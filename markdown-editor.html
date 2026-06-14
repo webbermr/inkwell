@@ -1193,11 +1193,27 @@ function greet(name) {
     reader.readAsText(file);
   }
 
+  /* drop an image: embed it as a data URL wrapped in image markdown at the caret */
+  const IMG_EXT = /\.(png|jpe?g|gif|webp|svg|bmp|avif|ico)$/i;
+  function isImage(file) { return /^image\//.test(file.type) || IMG_EXT.test(file.name); }
+  function insertImage(file) {
+    const reader = new FileReader();
+    reader.onload = () => {
+      const alt = file.name.replace(/\.[^.]+$/, '');
+      flush(); insert(`![${alt}](${reader.result})`); commitNow();
+      flash('Inserted ' + file.name);
+    };
+    reader.onerror = () => flash('Could not read image');
+    reader.readAsDataURL(file);
+  }
+
   /* drop a file anywhere onto the editor */
   ['dragover', 'drop'].forEach(t => editor.addEventListener(t, ev => ev.preventDefault()));
   editor.addEventListener('drop', ev => {
     const f = ev.dataTransfer.files[0];
-    if (f && /\.(md|markdown|txt)$/i.test(f.name)) loadFile(f);
+    if (!f) return;
+    if (isImage(f)) insertImage(f);
+    else if (/\.(md|markdown|txt)$/i.test(f.name)) loadFile(f);
   });
 
   /* ---- export menu (md / html file / copy / print-PDF) ---- */
