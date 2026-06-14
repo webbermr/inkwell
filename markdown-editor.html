@@ -301,11 +301,50 @@
   footer b { color: var(--ink-soft); font-weight: 600; }
   .saved-note { color: var(--accent); opacity: 0; transition: opacity .25s; }
   .saved-note.show { opacity: 1; }
+  .stats-wrap { position: relative; }
+  .stats-toggle {
+    height: 26px;
+    border: 1px solid var(--rule);
+    border-radius: 7px;
+    background: transparent;
+    color: var(--ink-soft);
+    font: 600 12px ui-monospace, Menlo, Consolas, monospace;
+    cursor: pointer;
+    padding: 0 9px;
+  }
+  .stats-toggle:hover,
+  .stats-toggle[aria-expanded="true"] {
+    background: var(--accent-soft);
+    border-color: var(--rule-strong);
+    color: var(--accent);
+  }
+  .stats-panel {
+    position: absolute;
+    left: 0;
+    bottom: 34px;
+    width: 260px;
+    padding: 10px;
+    border: 1px solid var(--rule-strong);
+    border-radius: 8px;
+    background: var(--panel);
+    box-shadow: var(--shadow);
+    z-index: 20;
+  }
+  .stats-panel[hidden] { display: none; }
+  .stats-grid {
+    display: grid;
+    grid-template-columns: 1fr auto;
+    gap: 7px 14px;
+  }
+  .stats-grid span { color: var(--ink-faint); }
+  .stats-grid b { text-align: right; }
 
   @media (max-width: 720px) {
     .work, .work[data-view] { grid-template-columns: 1fr; }
     .gutter, #previewPane { display: none; }
     .group:nth-child(n+4) { display: none; }
+    footer { gap: 10px; overflow-x: auto; }
+    .stats-panel { left: -78px; width: 238px; }
   }
 
   /* ---- confirmation modal ---- */
@@ -598,6 +637,20 @@
     <span><b id="words">0</b> words</span>
     <span><b id="chars">0</b> chars</span>
     <span><b id="read">0</b> min read</span>
+    <span class="stats-wrap">
+      <button class="stats-toggle" id="statsToggle" type="button" aria-expanded="false" aria-controls="statsPanel">Stats ▴</button>
+      <span class="stats-panel" id="statsPanel" hidden>
+        <span class="stats-grid">
+          <span>Headings</span><b id="statHeadings">0</b>
+          <span>Links</span><b id="statLinks">0</b>
+          <span>Code blocks</span><b id="statCode">0</b>
+          <span>Tables</span><b id="statTables">0</b>
+          <span>Mermaid</span><b id="statMermaid">0</b>
+          <span>Roadmaps</span><b id="statRoadmaps">0</b>
+          <span>Tasks</span><b id="statTasks">0 / 0</b>
+        </span>
+      </span>
+    </span>
     <span class="spacer"></span>
     <span class="saved-note" id="note"></span>
     <span id="persistNote">In-memory only — export to keep your work</span>
@@ -720,14 +773,103 @@ function greet(name) {
     renderRoadmaps();                            // custom roadmap blocks → swimlanes
     wireTasks();
     wireTables();                                // clickable column sorting
-    const text = editor.value.trim();
-    const words = text ? text.split(/\s+/).length : 0;
-    document.getElementById('words').textContent = words;
-    document.getElementById('chars').textContent = editor.value.length;
-    document.getElementById('read').textContent = Math.max(1, Math.round(words / 200));
+    updateDocumentStats();
     buildOutline();
     scheduleSave();
   }
+
+  /* ---- document stats ---- */
+  const statEls = {
+    words: document.getElementById('words'),
+    chars: document.getElementById('chars'),
+    read: document.getElementById('read'),
+    headings: document.getElementById('statHeadings'),
+    links: document.getElementById('statLinks'),
+    code: document.getElementById('statCode'),
+    tables: document.getElementById('statTables'),
+    mermaid: document.getElementById('statMermaid'),
+    roadmaps: document.getElementById('statRoadmaps'),
+    tasks: document.getElementById('statTasks')
+  };
+  const statsToggle = document.getElementById('statsToggle');
+  const statsPanel = document.getElementById('statsPanel');
+
+  function updateDocumentStats() {
+    const src = editor.value;
+    const text = src.trim();
+    const words = text ? text.split(/\s+/).length : 0;
+    const blockStats = countSpecialBlocks(src);
+    const tasks = countTasks(src);
+    statEls.words.textContent = words;
+    statEls.chars.textContent = src.length;
+    statEls.read.textContent = Math.max(1, Math.round(words / 200));
+    statEls.headings.textContent = preview.querySelectorAll('h1, h2, h3, h4, h5, h6').length;
+    statEls.links.textContent = preview.querySelectorAll('a[href]').length;
+    statEls.code.textContent = blockStats.code;
+    statEls.tables.textContent = preview.querySelectorAll('table').length;
+    statEls.mermaid.textContent = blockStats.mermaid;
+    statEls.roadmaps.textContent = blockStats.roadmap;
+    statEls.tasks.textContent = `${tasks.done} / ${tasks.total}`;
+  }
+
+  function countSpecialBlocks(src) {
+    const stats = { code: 0, mermaid: 0, roadmap: 0 };
+    const openFenceRe = /^ {0,3}(```+|~~~+)\s*([^\s`]*)?/;
+    const closeFenceRe = /^ {0,3}(```+|~~~+)\s*$/;
+    let inFence = false, fenceMark = '', fenceLen = 0;
+    src.split(/\r?\n/).forEach(line => {
+      if (!inFence) {
+        const m = line.match(openFenceRe);
+        if (!m) return;
+        inFence = true;
+        fenceMark = m[1][0];
+        fenceLen = m[1].length;
+        const lang = (m[2] || '').toLowerCase();
+        if (lang === 'mermaid') stats.mermaid++;
+        else if (lang === 'roadmap') stats.roadmap++;
+        else stats.code++;
+      } else {
+        const m = line.match(closeFenceRe);
+        if (m && m[1][0] === fenceMark && m[1].length >= fenceLen) inFence = false;
+      }
+    });
+    stats.code = Math.max(0, preview.querySelectorAll('pre > code:not(.language-mermaid):not(.language-roadmap)').length);
+    return stats;
+  }
+
+  function countTasks(src) {
+    const taskRe = /^\s*(?:[-*+]|\d+\.)\s+\[([ xX])\]/;
+    const openFenceRe = /^ {0,3}(```+|~~~+)/;
+    const closeFenceRe = /^ {0,3}(```+|~~~+)\s*$/;
+    let inFence = false, fenceMark = '', fenceLen = 0, total = 0, done = 0;
+    src.split(/\r?\n/).forEach(line => {
+      if (!inFence) {
+        const fence = line.match(openFenceRe);
+        if (fence) {
+          inFence = true;
+          fenceMark = fence[1][0];
+          fenceLen = fence[1].length;
+          return;
+        }
+      } else {
+        const fence = line.match(closeFenceRe);
+        if (fence && fence[1][0] === fenceMark && fence[1].length >= fenceLen) inFence = false;
+        return;
+      }
+      const m = line.match(taskRe);
+      if (!m) return;
+      total++;
+      if (m[1].toLowerCase() === 'x') done++;
+    });
+    return { total, done };
+  }
+
+  statsToggle.addEventListener('click', () => {
+    const expanded = statsToggle.getAttribute('aria-expanded') === 'true';
+    statsToggle.setAttribute('aria-expanded', String(!expanded));
+    statsPanel.hidden = expanded;
+    statsToggle.textContent = expanded ? 'Stats ▴' : 'Stats ▾';
+  });
 
   /* ---- front matter, math, diagrams (helpers) ---- */
   function esc(s) { return String(s).replace(/[&<>]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;' }[c])); }
@@ -1547,6 +1689,11 @@ function greet(name) {
       else if (!tableModal.hidden) closeTableModal();
       else if (!confirmModal.hidden) closeModal();
       else if (!aboutModal.hidden) closeAbout();
+      else if (!statsPanel.hidden) {
+        statsPanel.hidden = true;
+        statsToggle.setAttribute('aria-expanded', 'false');
+        statsToggle.textContent = 'Stats ▴';
+      }
     }
   });
 
