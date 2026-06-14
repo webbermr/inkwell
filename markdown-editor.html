@@ -1193,18 +1193,18 @@ function greet(name) {
     reader.readAsText(file);
   }
 
-  /* drop an image: embed it as a data URL wrapped in image markdown at the caret */
+  /* drop an image: reference the local file name in image markdown at the caret */
   const IMG_EXT = /\.(png|jpe?g|gif|webp|svg|bmp|avif|ico)$/i;
   function isImage(file) { return /^image\//.test(file.type) || IMG_EXT.test(file.name); }
+  function markdownAlt(name) { return name.replace(/\.[^.]+$/, '').replace(/\\/g, '\\\\').replace(/]/g, '\\]'); }
+  function markdownUrl(name) {
+    return encodeURIComponent(name).replace(/[!'()*]/g, ch => '%' + ch.charCodeAt(0).toString(16).toUpperCase());
+  }
   function insertImage(file) {
-    const reader = new FileReader();
-    reader.onload = () => {
-      const alt = file.name.replace(/\.[^.]+$/, '');
-      flush(); insert(`![${alt}](${reader.result})`); commitNow();
-      flash('Inserted ' + file.name);
-    };
-    reader.onerror = () => flash('Could not read image');
-    reader.readAsDataURL(file);
+    flush();
+    insert(`![${markdownAlt(file.name)}](${markdownUrl(file.name)})`);
+    commitNow();
+    flash('Inserted ' + file.name);
   }
 
   /* drop a file anywhere onto the editor */
