@@ -605,6 +605,7 @@
     padding: 6px; min-width: 184px;
     display: flex; flex-direction: column; gap: 2px;
   }
+  .menu.start { left: 0; right: auto; }
   .menu[hidden] { display: none; }
   .menu button {
     text-align: left; border: none; background: transparent; color: var(--ink-soft);
@@ -649,11 +650,16 @@
         <button class="tool" data-act="ol" title="Numbered list">1. List</button>
         <button class="tool" data-act="task" title="Task list">☑ Task</button>
         <button class="tool" data-act="quote" title="Quote">❝ Quote</button>
-        <button class="tool" data-act="calloutNote" title="Note callout">Note</button>
-        <button class="tool" data-act="calloutTip" title="Tip callout">Tip</button>
-        <button class="tool" data-act="calloutImportant" title="Important callout">Important</button>
-        <button class="tool" data-act="calloutWarning" title="Warning callout">Warning</button>
-        <button class="tool" data-act="calloutCaution" title="Caution callout">Caution</button>
+        <div class="menu-wrap">
+          <button class="tool" id="calloutBtn" title="Insert a callout">Callout ▾</button>
+          <div class="menu start" id="calloutMenu" hidden>
+            <button data-act="calloutNote">Note</button>
+            <button data-act="calloutTip">Tip</button>
+            <button data-act="calloutImportant">Important</button>
+            <button data-act="calloutWarning">Warning</button>
+            <button data-act="calloutCaution">Caution</button>
+          </div>
+        </div>
       </div>
       <div class="group">
         <button class="tool" data-act="code" title="Inline code"><span class="hint">`code`</span></button>
@@ -1419,8 +1425,13 @@ function greet(name) {
   function sel() { return editor.value.slice(editor.selectionStart, editor.selectionEnd); }
 
   document.getElementById('toolbar').addEventListener('click', ev => {
-    const btn = ev.target.closest('button.tool');
-    if (btn && actions[btn.dataset.act]) { flush(); actions[btn.dataset.act](); commitNow(); }
+    const btn = ev.target.closest('button[data-act]');
+    if (btn && actions[btn.dataset.act]) {
+      flush();
+      actions[btn.dataset.act]();
+      document.getElementById('calloutMenu')?.setAttribute('hidden', '');
+      commitNow();
+    }
   });
 
   /* ---- command palette ---- */
@@ -1662,11 +1673,28 @@ function greet(name) {
     else if (/\.(md|markdown|txt)$/i.test(f.name)) loadFile(f);
   });
 
-  /* ---- export menu (md / html file / copy / print-PDF) ---- */
+  /* ---- toolbar menus ---- */
+  const calloutBtn = document.getElementById('calloutBtn');
+  const calloutMenu = document.getElementById('calloutMenu');
   const exportBtn = document.getElementById('exportBtn');
   const exportMenu = document.getElementById('exportMenu');
-  exportBtn.addEventListener('click', e => { e.stopPropagation(); exportMenu.hidden = !exportMenu.hidden; });
-  document.addEventListener('click', () => { exportMenu.hidden = true; });
+
+  calloutBtn.addEventListener('click', e => {
+    e.stopPropagation();
+    exportMenu.hidden = true;
+    calloutMenu.hidden = !calloutMenu.hidden;
+  });
+  exportBtn.addEventListener('click', e => {
+    e.stopPropagation();
+    calloutMenu.hidden = true;
+    exportMenu.hidden = !exportMenu.hidden;
+  });
+  document.addEventListener('click', () => {
+    calloutMenu.hidden = true;
+    exportMenu.hidden = true;
+  });
+
+  /* ---- export menu (md / html file / copy / print-PDF) ---- */
   exportMenu.addEventListener('click', e => {
     const b = e.target.closest('button[data-exp]'); if (!b) return;
     exportMenu.hidden = true;
