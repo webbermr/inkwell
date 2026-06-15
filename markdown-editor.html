@@ -869,6 +869,7 @@ function greet(name) {
     renderRoadmaps();                            // custom roadmap blocks → swimlanes
     wireTasks();
     wireTables();                                // clickable column sorting
+    rebuildScrollAnchors(src);
     updateDocumentStats();
     buildOutline();
     scheduleSave();
@@ -1076,6 +1077,7 @@ function greet(name) {
         const fig = document.createElement('div');
         fig.className = 'mermaid-fig';
         fig.innerHTML = svg;           // mermaid output (strict mode sanitizes)
+        if (pre.dataset.srcLine) fig.dataset.srcLine = pre.dataset.srcLine;
         pre.replaceWith(fig);
       } catch { /* leave source visible */ }
       sandbox.innerHTML = '';
@@ -1653,6 +1655,7 @@ function greet(name) {
   function cleanPreviewHtml() {
     const clone = preview.cloneNode(true);
     clone.querySelectorAll('.copy-btn').forEach(b => b.remove());   // drop UI-only buttons
+    clone.querySelectorAll('[data-src-line]').forEach(n => n.removeAttribute('data-src-line'));
     return clone.innerHTML;
   }
   function exportMd(name) { downloadFile(name, editor.value, 'text/markdown'); flash('Saved ' + name); }
@@ -1759,17 +1762,179 @@ function greet(name) {
     setTimeout(() => n.classList.remove('show'), 1400);
   }
 
-  /* ---- scroll sync (split view) ---- */
-  let lock = false;
-  function sync(from, to) {
-    if (lock) return; lock = true;
-    const r = from.scrollTop / (from.scrollHeight - from.clientHeight || 1);
-    to.scrollTop = r * (to.scrollHeight - to.clientHeight);
-    requestAnimationFrame(() => lock = false);
-  }
   const ep = document.getElementById('editorPane'), pp = document.getElementById('previewPane');
-  ep.addEventListener('scroll', () => sync(ep, pp));
-  pp.addEventListener('scroll', () => sync(pp, ep));
+
+  /* ---- scroll sync (split view) ---- */
+  let syncScrollLock = false;
+  let sourceBlockLines = [];
+
+  function rebuildScrollAnchors(src) {
+    sourceBlockLines = collectSourceBlockLines(src);
+    const blocks = Array.from(preview.children).filter(el => el.offsetParent !== null || el.getClientRects().length);
+    blocks.forEach(el => delete el.dataset.srcLine);
+    blocks.forEach((el, i) => {
+      if (sourceBlockLines[i] == null) return;
+      el.dataset.srcLine = String(sourceBlockLines[i]);
+    });
+  }
+
+  function collectSourceBlockLines(src) {
+    const lines = src.split('\n');
+    const blocks = [];
+    let i = 0;
+    if (/^---[ \t]*$/.test(lines[0] || '')) {
+      for (let j = 1; j < lines.length; j++) {
+        if (/^---[ \t]*$/.test(lines[j])) {
+          blocks.push(0);
+          i = j + 1;
+          break;
+        }
+      }
+    }
+    while (i < lines.length) {
+      const line = lines[i];
+      const trimmed = line.trim();
+      if (!trimmed) { i++; continue; }
+      blocks.push(i);
+
+      const fence = line.match(/^ {0,3}(```+|~~~+)/);
+      if (fence) {
+        const mark = fence[1][0], len = fence[1].length;
+        i++;
+        while (i < lines.length) {
+          const close = lines[i].match(/^ {0,3}(```+|~~~+)\s*$/);
+          if (close && close[1][0] === mark && close[1].length >= len) { i++; break; }
+          i++;
+        }
+        continue;
+      }
+
+      if (/^ {0,3}#{1,6}\s+/.test(line)) { i++; continue; }
+      if (isTableStart(lines, i)) {
+        i += 2;
+        while (i < lines.length && /\|/.test(lines[i]) && lines[i].trim()) i++;
+        continue;
+      }
+
+      const listRe = /^\s*(?:[-*+]|\d+[.)])\s+/;
+      const quoteRe = /^ {0,3}>\s?/;
+      if (listRe.test(line)) {
+        i++;
+        while (i < lines.length && (listRe.test(lines[i]) || /^\s{2,}\S/.test(lines[i]) || !lines[i].trim())) i++;
+        continue;
+      }
+      if (quoteRe.test(line)) {
+        i++;
+        while (i < lines.length && (quoteRe.test(lines[i]) || !lines[i].trim())) i++;
+        continue;
+      }
+
+      i++;
+      while (i < lines.length && lines[i].trim() && !startsNewMarkdownBlock(lines, i)) i++;
+    }
+    if (!blocks.length) blocks.push(0);
+    return blocks;
+  }
+
+  function startsNewMarkdownBlock(lines, i) {
+    const line = lines[i];
+    return /^ {0,3}(```+|~~~+)/.test(line) ||
+      /^ {0,3}#{1,6}\s+/.test(line) ||
+      /^\s*(?:[-*+]|\d+[.)])\s+/.test(line) ||
+      /^ {0,3}>\s?/.test(line) ||
+      isTableStart(lines, i);
+  }
+
+  function isTableStart(lines, i) {
+    return /\|/.test(lines[i] || '') && /^ {0,3}\|?\s*:?-{3,}:?\s*(\|\s*:?-{3,}:?\s*)+\|?\s*$/.test(lines[i + 1] || '');
+  }
+
+  function scrollMax(el) {
+    return Math.max(0, el.scrollHeight - el.clientHeight);
+  }
+
+  function editorScrollHost() {
+    return scrollMax(editor) > 0 ? editor : ep;
+  }
+
+  function editorLineHeight() {
+    return parseFloat(getComputedStyle(editor).lineHeight) || 24;
+  }
+
+  function editorTopLine() {
+    const host = editorScrollHost();
+    return host.scrollTop / editorLineHeight();
+  }
+
+  function setEditorTopLine(line) {
+    const target = Math.max(0, line * editorLineHeight());
+    editor.scrollTop = target;
+    ep.scrollTop = target;
+  }
+
+  function previewPoints() {
+    return Array.from(preview.querySelectorAll('[data-src-line]')).map(el => ({
+      line: Number(el.dataset.srcLine) || 0,
+      top: el.getBoundingClientRect().top - pp.getBoundingClientRect().top + pp.scrollTop
+    })).filter((pt, i, pts) => i === 0 || pt.line > pts[i - 1].line);
+  }
+
+  function lineToPreviewTop(line) {
+    const pts = previewPoints();
+    const max = scrollMax(pp);
+    if (!pts.length) return scrollMax(editorScrollHost()) ? (editorScrollHost().scrollTop / scrollMax(editorScrollHost())) * max : 0;
+    if (line <= pts[0].line) return Math.min(max, pts[0].top);
+    for (let i = 1; i < pts.length; i++) {
+      if (line <= pts[i].line) {
+        const prev = pts[i - 1], next = pts[i];
+        const span = next.line - prev.line || 1;
+        return Math.min(max, prev.top + ((line - prev.line) / span) * (next.top - prev.top));
+      }
+    }
+    const last = pts[pts.length - 1];
+    const total = Math.max(last.line + 1, editor.value.split('\n').length - 1);
+    const span = Math.max(1, total - last.line);
+    return Math.min(max, last.top + ((line - last.line) / span) * (max - last.top));
+  }
+
+  function previewTopToLine(top) {
+    const pts = previewPoints();
+    if (!pts.length) {
+      const max = scrollMax(pp);
+      return max ? (top / max) * Math.max(0, editor.value.split('\n').length - 1) : 0;
+    }
+    if (top <= pts[0].top) return pts[0].line;
+    for (let i = 1; i < pts.length; i++) {
+      if (top <= pts[i].top) {
+        const prev = pts[i - 1], next = pts[i];
+        const span = next.top - prev.top || 1;
+        return prev.line + ((top - prev.top) / span) * (next.line - prev.line);
+      }
+    }
+    const last = pts[pts.length - 1];
+    const total = Math.max(last.line + 1, editor.value.split('\n').length - 1);
+    const span = Math.max(1, scrollMax(pp) - last.top);
+    return last.line + ((top - last.top) / span) * (total - last.line);
+  }
+
+  function withScrollLock(fn) {
+    if (syncScrollLock) return;
+    syncScrollLock = true;
+    fn();
+    requestAnimationFrame(() => { syncScrollLock = false; });
+  }
+
+  function syncEditorToPreview() {
+    withScrollLock(() => { pp.scrollTop = lineToPreviewTop(editorTopLine()); });
+  }
+
+  function syncPreviewToEditor() {
+    withScrollLock(() => { setEditorTopLine(previewTopToLine(pp.scrollTop)); });
+  }
+
+  editor.addEventListener('scroll', syncEditorToPreview);
+  ep.addEventListener('scroll', syncEditorToPreview);
+  pp.addEventListener('scroll', syncPreviewToEditor);
 
   /* ---- smart lists: Enter continues / exits, Tab indents ---- */
   function handleEnter(ev) {
