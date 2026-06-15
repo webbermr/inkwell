@@ -420,6 +420,66 @@
   .fname-row input:focus { outline: none; border-color: var(--accent); }
   .fname-ext { font-family: ui-monospace, Menlo, Consolas, monospace; color: var(--ink-faint); font-size: 14px; }
 
+  /* ---- command palette ---- */
+  .command-modal {
+    padding: 14px;
+    width: min(560px, calc(100vw - 32px));
+  }
+  .command-head {
+    display: flex; align-items: baseline; justify-content: space-between;
+    gap: 12px; margin-bottom: 10px;
+  }
+  .command-head h3 { margin: 0; }
+  .command-shortcut {
+    font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+    color: var(--ink-faint); font-size: 11.5px;
+  }
+  .command-input {
+    width: 100%; height: 42px; padding: 0 13px;
+    border: 1px solid var(--rule-strong); border-radius: 9px;
+    background: var(--bg); color: var(--ink);
+    font: 15px ui-sans-serif, system-ui, sans-serif;
+    margin-bottom: 8px;
+  }
+  .command-input:focus { outline: none; border-color: var(--accent); }
+  .command-list {
+    max-height: min(390px, 52vh);
+    overflow: auto;
+    display: flex; flex-direction: column; gap: 2px;
+  }
+  .command-item {
+    display: grid; grid-template-columns: 1fr auto; gap: 12px;
+    align-items: center;
+    border: 1px solid transparent; border-radius: 8px;
+    background: transparent; color: var(--ink);
+    padding: 9px 10px;
+    text-align: left; cursor: pointer;
+    font: 600 13.5px ui-sans-serif, system-ui, sans-serif;
+  }
+  .command-item:hover,
+  .command-item.active {
+    background: var(--accent-soft);
+    border-color: var(--rule-strong);
+    color: var(--accent);
+  }
+  .command-item small {
+    display: block;
+    color: var(--ink-faint);
+    font-size: 12px;
+    font-weight: 400;
+    margin-top: 2px;
+  }
+  .command-tag {
+    color: var(--ink-faint);
+    font: 11px ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+  }
+  .command-empty {
+    color: var(--ink-faint);
+    font-size: 13px;
+    padding: 18px 10px;
+    text-align: center;
+  }
+
   /* ---- outline / TOC ---- */
   .app-body { flex: 1; display: flex; min-height: 0; }
   #outline {
@@ -708,6 +768,17 @@
         <button class="tool" id="fnameCancel">Cancel</button>
         <button class="tool primary" id="fnameConfirm">Download</button>
       </div>
+    </div>
+  </div>
+
+  <div class="modal-backdrop" id="commandModal" hidden>
+    <div class="modal command-modal" role="dialog" aria-modal="true" aria-labelledby="commandTitle">
+      <div class="command-head">
+        <h3 id="commandTitle">Command palette</h3>
+        <span class="command-shortcut">Ctrl/⌘ Shift P</span>
+      </div>
+      <input type="text" class="command-input" id="commandInput" placeholder="Run a command..." aria-label="Run a command" autocomplete="off">
+      <div class="command-list" id="commandList" role="listbox" aria-label="Commands"></div>
     </div>
   </div>
 
@@ -1257,6 +1328,130 @@ function greet(name) {
     if (btn && actions[btn.dataset.act]) { flush(); actions[btn.dataset.act](); commitNow(); }
   });
 
+  /* ---- command palette ---- */
+  const commandModal = document.getElementById('commandModal');
+  const commandInput = document.getElementById('commandInput');
+  const commandList = document.getElementById('commandList');
+  let commandMatches = [], commandIndex = 0;
+
+  function runActionCommand(key) {
+    flush();
+    actions[key]();
+    commitNow();
+  }
+
+  const ACTION_COMMANDS = [
+    ['h', 'Format: Heading', 'Add a second-level heading prefix', 'Format'],
+    ['bold', 'Format: Bold', 'Wrap selection in bold markers', 'Format'],
+    ['italic', 'Format: Italic', 'Wrap selection in italic markers', 'Format'],
+    ['strike', 'Format: Strikethrough', 'Wrap selection in strikethrough markers', 'Format'],
+    ['code', 'Format: Inline code', 'Wrap selection in inline code markers', 'Format'],
+    ['block', 'Insert code block', 'Insert a fenced code block', 'Insert'],
+    ['ul', 'Format: Bullet list', 'Prefix selected lines as bullets', 'Format'],
+    ['ol', 'Format: Numbered list', 'Prefix selected lines as a numbered list', 'Format'],
+    ['task', 'Format: Task list', 'Prefix selected lines as tasks', 'Format'],
+    ['quote', 'Format: Quote', 'Prefix selected lines as a blockquote', 'Format'],
+    ['link', 'Insert link', 'Wrap selection in a Markdown link', 'Insert'],
+    ['image', 'Insert image', 'Insert Markdown image syntax', 'Insert'],
+    ['rule', 'Insert divider', 'Insert a horizontal rule', 'Insert'],
+    ['table', 'Insert table', 'Open the table builder', 'Insert'],
+    ['diagram', 'Insert diagram', 'Open the diagram helper', 'Insert']
+  ];
+  const COMMANDS = ACTION_COMMANDS.map(([key, name, desc, tag]) => ({
+    name, desc, tag,
+    keywords: key,
+    run: () => runActionCommand(key)
+  })).concat([
+    { name: 'Toggle theme', desc: 'Switch between light and dark mode', tag: 'View', keywords: 'dark light appearance', run: () => document.getElementById('theme').click() },
+    { name: 'Export Markdown', desc: 'Download the source as a .md file', tag: 'Export', keywords: 'save md markdown download', run: () => openFilenameModal('md') },
+    { name: 'Export HTML', desc: 'Download the preview as a standalone HTML file', tag: 'Export', keywords: 'save html download', run: () => openFilenameModal('html') },
+    { name: 'Copy HTML', desc: 'Copy the rendered preview HTML', tag: 'Export', keywords: 'clipboard rendered preview', run: () => copyHtmlOut() },
+    { name: 'Print / PDF', desc: 'Open the browser print dialog', tag: 'Export', keywords: 'pdf paper', run: () => window.print() },
+    { name: 'Find', desc: 'Open find and replace', tag: 'Search', keywords: 'replace search', run: () => openFind(false) },
+    { name: 'New document', desc: 'Start a blank document with confirmation if needed', tag: 'File', keywords: 'clear reset', run: () => document.getElementById('newDoc').click() },
+    { name: 'Import Markdown', desc: 'Choose a Markdown or text file to import', tag: 'File', keywords: 'open file', run: () => document.getElementById('fileInput').click() },
+    { name: 'Toggle outline', desc: 'Show or hide the heading outline', tag: 'View', keywords: 'toc headings sidebar', run: () => document.getElementById('outlineToggle').click() },
+    { name: 'View: Split', desc: 'Show editor and preview side by side', tag: 'View', keywords: 'layout', run: () => setViewMode('split') },
+    { name: 'View: Write', desc: 'Show only the editor', tag: 'View', keywords: 'editor source layout', run: () => setViewMode('editor') },
+    { name: 'View: Read', desc: 'Show only the preview', tag: 'View', keywords: 'preview layout', run: () => setViewMode('preview') }
+  ]);
+
+  function commandHaystack(cmd) {
+    return `${cmd.name} ${cmd.desc} ${cmd.tag} ${cmd.keywords || ''}`.toLowerCase();
+  }
+  function updateCommandMatches() {
+    const q = commandInput.value.trim().toLowerCase();
+    const terms = q.split(/\s+/).filter(Boolean);
+    commandMatches = COMMANDS.filter(cmd => terms.every(term => commandHaystack(cmd).includes(term)));
+    commandIndex = Math.min(commandIndex, Math.max(0, commandMatches.length - 1));
+    renderCommandList();
+  }
+  function renderCommandList() {
+    commandList.innerHTML = '';
+    if (!commandMatches.length) {
+      const empty = document.createElement('div');
+      empty.className = 'command-empty';
+      empty.textContent = 'No matching commands';
+      commandList.appendChild(empty);
+      return;
+    }
+    commandMatches.forEach((cmd, idx) => {
+      const btn = document.createElement('button');
+      btn.type = 'button';
+      btn.className = 'command-item' + (idx === commandIndex ? ' active' : '');
+      btn.setAttribute('role', 'option');
+      btn.setAttribute('aria-selected', idx === commandIndex ? 'true' : 'false');
+      btn.innerHTML = `<span>${esc(cmd.name)}<small>${esc(cmd.desc)}</small></span><span class="command-tag">${esc(cmd.tag)}</span>`;
+      btn.addEventListener('mouseenter', () => { commandIndex = idx; paintCommandSelection(); });
+      btn.addEventListener('click', () => runCommand(cmd));
+      commandList.appendChild(btn);
+      if (idx === commandIndex) btn.scrollIntoView({ block: 'nearest' });
+    });
+  }
+  function paintCommandSelection() {
+    commandList.querySelectorAll('.command-item').forEach((btn, idx) => {
+      const active = idx === commandIndex;
+      btn.classList.toggle('active', active);
+      btn.setAttribute('aria-selected', active ? 'true' : 'false');
+      if (active) btn.scrollIntoView({ block: 'nearest' });
+    });
+  }
+  function openCommandPalette() {
+    commandInput.value = '';
+    commandIndex = 0;
+    commandMatches = COMMANDS.slice();
+    renderCommandList();
+    commandModal.hidden = false;
+    commandInput.focus();
+  }
+  function closeCommandPalette() {
+    commandModal.hidden = true;
+    editor.focus();
+  }
+  function runCommand(cmd) {
+    closeCommandPalette();
+    cmd.run();
+  }
+  commandInput.addEventListener('input', updateCommandMatches);
+  commandInput.addEventListener('keydown', ev => {
+    if (ev.key === 'ArrowDown' || ev.key === 'ArrowUp') {
+      ev.preventDefault();
+      ev.stopPropagation();
+      const dir = ev.key === 'ArrowDown' ? 1 : -1;
+      if (commandMatches.length) commandIndex = (commandIndex + dir + commandMatches.length) % commandMatches.length;
+      paintCommandSelection();
+    } else if (ev.key === 'Enter') {
+      ev.preventDefault();
+      ev.stopPropagation();
+      if (commandMatches[commandIndex]) runCommand(commandMatches[commandIndex]);
+    } else if (ev.key === 'Escape') {
+      ev.preventDefault();
+      ev.stopPropagation();
+      closeCommandPalette();
+    }
+  });
+  commandModal.addEventListener('click', ev => { if (ev.target === commandModal) closeCommandPalette(); });
+
   /* ---- keyboard shortcuts ---- */
   editor.addEventListener('keydown', ev => {
     const cmd = ev.metaKey || ev.ctrlKey;
@@ -1274,10 +1469,15 @@ function greet(name) {
   });
 
   /* ---- view modes ---- */
+  function setViewMode(mode) {
+    const b = document.querySelector(`#viewSeg button[data-view="${mode}"]`);
+    if (!b) return;
+    document.querySelectorAll('#viewSeg button').forEach(x => x.classList.toggle('active', x === b));
+    work.dataset.view = mode;
+  }
   document.getElementById('viewSeg').addEventListener('click', ev => {
     const b = ev.target.closest('button'); if (!b) return;
-    document.querySelectorAll('#viewSeg button').forEach(x => x.classList.toggle('active', x === b));
-    work.dataset.view = b.dataset.view;
+    setViewMode(b.dataset.view);
   });
 
   /* ---- theme ---- */
@@ -1323,7 +1523,7 @@ function greet(name) {
   document.getElementById('confirmNew').addEventListener('click', () => { closeModal(); clearDoc(); });
   document.getElementById('cancelNew').addEventListener('click', closeModal);
   confirmModal.addEventListener('click', ev => { if (ev.target === confirmModal) closeModal(); });
-  document.addEventListener('keydown', ev => { if (ev.key === 'Escape' && !confirmModal.hidden) closeModal(); });
+  document.addEventListener('keydown', ev => { if (ev.key === 'Escape' && commandModal.hidden && !confirmModal.hidden) closeModal(); });
 
   /* ---- import ---- */
   const fileInput = document.getElementById('fileInput');
@@ -1681,9 +1881,11 @@ function greet(name) {
   /* find/replace shortcuts + global Escape */
   document.addEventListener('keydown', ev => {
     const cmd = ev.metaKey || ev.ctrlKey;
+    if (cmd && ev.shiftKey && ev.key.toLowerCase() === 'p') { ev.preventDefault(); openCommandPalette(); return; }
     if (cmd && ev.key.toLowerCase() === 'f') { ev.preventDefault(); openFind(ev.altKey); return; }
     if (ev.key === 'Escape') {
-      if (!findBar.hidden) closeFind();
+      if (!commandModal.hidden) closeCommandPalette();
+      else if (!findBar.hidden) closeFind();
       else if (!fnameModal.hidden) closeFilename();
       else if (!diagramModal.hidden) closeDiagram();
       else if (!tableModal.hidden) closeTableModal();
