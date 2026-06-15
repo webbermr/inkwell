@@ -263,6 +263,30 @@
     color: var(--ink-soft);
     font-style: italic;
   }
+  #preview blockquote.callout {
+    padding: 12px 16px;
+    border: 1px solid var(--rule);
+    border-left: 4px solid var(--callout-mark, var(--accent));
+    border-radius: 8px;
+    background: var(--code-bg);
+    color: var(--ink);
+    font-style: normal;
+  }
+  #preview .callout-note,
+  #preview .callout-tip { --callout-mark: var(--accent); }
+  #preview .callout-important { --callout-mark: var(--ink-soft); }
+  #preview .callout-warning,
+  #preview .callout-caution { --callout-mark: var(--ink-faint); }
+  #preview .callout-title {
+    margin-bottom: 5px;
+    font: 700 12px ui-sans-serif, system-ui, sans-serif;
+    letter-spacing: .06em;
+    text-transform: uppercase;
+    color: var(--callout-mark, var(--accent));
+  }
+  #preview blockquote.callout > :last-child { margin-bottom: 0; }
+  #preview .callout-title + * { margin-top: 0; }
+  #preview blockquote.callout > :first-child:not(.callout-title) { margin-top: 0; }
   #preview table { border-collapse: collapse; width: 100%; margin: 1em 0; font-size: .92em; }
   #preview th, #preview td { border: 1px solid var(--rule-strong); padding: 7px 11px; text-align: left; }
   #preview th { background: var(--code-bg); }
@@ -767,6 +791,7 @@ function greet(name) {
     raw = DOMPurify.sanitize(raw);
     raw = restoreMath(raw, prot.store);          // put the math text back (escaped)
     preview.innerHTML = (fm.cardHtml || '') + raw;
+    renderCallouts();                            // GitHub-style blockquote callouts
     renderMath();                                // KaTeX over the restored text
     highlightCode();                             // hljs (skips mermaid)
     renderMermaid();                             // mermaid blocks → diagrams
@@ -776,6 +801,47 @@ function greet(name) {
     updateDocumentStats();
     buildOutline();
     scheduleSave();
+  }
+
+  /* ---- callouts ---- */
+  const CALLOUT_TYPES = new Set(['NOTE', 'TIP', 'IMPORTANT', 'WARNING', 'CAUTION']);
+
+  function renderCallouts() {
+    preview.querySelectorAll('blockquote').forEach(quote => {
+      const marker = takeCalloutMarker(quote);
+      if (!marker) return;
+      const type = marker.toLowerCase();
+      quote.classList.add('callout', `callout-${type}`);
+      const title = document.createElement('div');
+      title.className = 'callout-title';
+      title.textContent = marker;
+      quote.prepend(title);
+    });
+  }
+
+  function takeCalloutMarker(quote) {
+    const walker = document.createTreeWalker(quote, NodeFilter.SHOW_TEXT);
+    let node = walker.nextNode();
+    while (node && !node.nodeValue.trim()) node = walker.nextNode();
+    if (!node) return '';
+    const markerRe = /^\s*\[!(NOTE|TIP|IMPORTANT|WARNING|CAUTION)\]\s*/i;
+    const match = node.nodeValue.match(markerRe);
+    if (!match) return '';
+    const marker = match[1].toUpperCase();
+    if (!CALLOUT_TYPES.has(marker)) return '';
+    node.nodeValue = node.nodeValue.replace(markerRe, '');
+    trimEmptyCalloutLead(quote);
+    return marker;
+  }
+
+  function trimEmptyCalloutLead(quote) {
+    const first = quote.firstElementChild;
+    if (!first || first.tagName !== 'P') return;
+    while (first.firstChild && first.firstChild.nodeType === Node.TEXT_NODE && !first.firstChild.nodeValue.trim()) {
+      first.firstChild.remove();
+    }
+    if (first.firstChild && first.firstChild.nodeName === 'BR') first.firstChild.remove();
+    if (!first.textContent.trim() && !first.querySelector('img, svg, table, pre, code, input')) first.remove();
   }
 
   /* ---- document stats ---- */
@@ -1409,6 +1475,15 @@ function greet(name) {
   code { font-family: ui-monospace, Menlo, Consolas, monospace; font-size: .88em; }
   pre code { font-size: .85em; }
   blockquote { border-left: 3px solid #126e63; margin: 1em 0; padding: .2em 1em; color: #5b5d66; font-style: italic; }
+  blockquote.callout { padding: 12px 16px; border: 1px solid #e7e6e1; border-left: 4px solid #126e63; border-radius: 8px; background: #f3f2ee; color: #1c1d22; font-style: normal; }
+  .callout-important { border-left-color: #5b5d66; }
+  .callout-warning, .callout-caution { border-left-color: #9a9ca5; }
+  .callout-title { margin-bottom: 5px; font: 700 12px ui-sans-serif, system-ui, sans-serif; letter-spacing: .06em; text-transform: uppercase; color: #126e63; }
+  .callout-important .callout-title { color: #5b5d66; }
+  .callout-warning .callout-title, .callout-caution .callout-title { color: #9a9ca5; }
+  blockquote.callout > :last-child { margin-bottom: 0; }
+  .callout-title + * { margin-top: 0; }
+  blockquote.callout > :first-child:not(.callout-title) { margin-top: 0; }
   table { border-collapse: collapse; width: 100%; margin: 1em 0; } th,td { border: 1px solid #d9d8d2; padding: 7px 11px; text-align: left; } th { background: #f3f2ee; }
   img { max-width: 100%; } hr { border: none; border-top: 1px solid #d9d8d2; margin: 2em 0; }
   .frontmatter { border: 1px solid #e7e6e1; border-left: 3px solid #126e63; background: #f3f2ee; border-radius: 8px; padding: 12px 16px; margin-bottom: 1.3em; font-family: ui-sans-serif, system-ui, sans-serif; }
