@@ -649,6 +649,11 @@
         <button class="tool" data-act="ol" title="Numbered list">1. List</button>
         <button class="tool" data-act="task" title="Task list">☑ Task</button>
         <button class="tool" data-act="quote" title="Quote">❝ Quote</button>
+        <button class="tool" data-act="calloutNote" title="Note callout">Note</button>
+        <button class="tool" data-act="calloutTip" title="Tip callout">Tip</button>
+        <button class="tool" data-act="calloutImportant" title="Important callout">Important</button>
+        <button class="tool" data-act="calloutWarning" title="Warning callout">Warning</button>
+        <button class="tool" data-act="calloutCaution" title="Caution callout">Caution</button>
       </div>
       <div class="group">
         <button class="tool" data-act="code" title="Inline code"><span class="hint">`code`</span></button>
@@ -1369,6 +1374,23 @@ function greet(name) {
     editor.setRangeText(text, s, editor.selectionEnd, 'end');
     editor.focus(); render();
   }
+  function insertCallout(type) {
+    const s = editor.selectionStart, e = editor.selectionEnd;
+    const picked = editor.value.slice(s, e);
+    const beforeBreak = s > 0 && editor.value[s - 1] !== '\n' ? '\n\n' : '';
+    const afterBreak = e < editor.value.length && editor.value[e] !== '\n' ? '\n\n' : '';
+    const body = (picked || 'Text')
+      .split('\n')
+      .map(line => line ? `> ${line}` : '>')
+      .join('\n');
+    const callout = `${beforeBreak}> [!${type}]\n${body}${afterBreak}`;
+    editor.setRangeText(callout, s, e, 'end');
+    if (!picked) {
+      const textStart = s + beforeBreak.length + `> [!${type}]\n> `.length;
+      editor.setSelectionRange(textStart, textStart + 4);
+    }
+    editor.focus(); render();
+  }
 
   const actions = {
     h:      () => linePrefix('## '),
@@ -1381,6 +1403,11 @@ function greet(name) {
     ol:     () => linePrefix('1. '),
     task:   () => linePrefix('- [ ] '),
     quote:  () => linePrefix('> '),
+    calloutNote:      () => insertCallout('NOTE'),
+    calloutTip:       () => insertCallout('TIP'),
+    calloutImportant: () => insertCallout('IMPORTANT'),
+    calloutWarning:   () => insertCallout('WARNING'),
+    calloutCaution:   () => insertCallout('CAUTION'),
     link:   () => surround('[', '](https://)'),
     image:  () => insert('![alt](https://)'),
     rule:   () => insert('\n\n---\n\n'),
@@ -1417,6 +1444,11 @@ function greet(name) {
     ['ol', 'Format: Numbered list', 'Prefix selected lines as a numbered list', 'Format'],
     ['task', 'Format: Task list', 'Prefix selected lines as tasks', 'Format'],
     ['quote', 'Format: Quote', 'Prefix selected lines as a blockquote', 'Format'],
+    ['calloutNote', 'Insert note callout', 'Insert a note callout block', 'Insert'],
+    ['calloutTip', 'Insert tip callout', 'Insert a tip callout block', 'Insert'],
+    ['calloutImportant', 'Insert important callout', 'Insert an important callout block', 'Insert'],
+    ['calloutWarning', 'Insert warning callout', 'Insert a warning callout block', 'Insert'],
+    ['calloutCaution', 'Insert caution callout', 'Insert a caution callout block', 'Insert'],
     ['link', 'Insert link', 'Wrap selection in a Markdown link', 'Insert'],
     ['image', 'Insert image', 'Insert Markdown image syntax', 'Insert'],
     ['rule', 'Insert divider', 'Insert a horizontal rule', 'Insert'],
