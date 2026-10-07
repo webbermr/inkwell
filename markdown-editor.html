@@ -687,6 +687,7 @@
       <div class="menu" id="exportMenu" hidden>
         <button data-exp="md">Markdown (.md)</button>
         <button data-exp="html">HTML file (.html)</button>
+        <button data-exp="docx">Word document (.docx)</button>
         <button data-exp="copy">Copy HTML</button>
         <button data-exp="print">Print / PDF…</button>
       </div>
@@ -1476,6 +1477,7 @@ function greet(name) {
     { name: 'Toggle theme', desc: 'Switch between light and dark mode', tag: 'View', keywords: 'dark light appearance', run: () => document.getElementById('theme').click() },
     { name: 'Export Markdown', desc: 'Download the source as a .md file', tag: 'Export', keywords: 'save md markdown download', run: () => openFilenameModal('md') },
     { name: 'Export HTML', desc: 'Download the preview as a standalone HTML file', tag: 'Export', keywords: 'save html download', run: () => openFilenameModal('html') },
+    { name: 'Export Word', desc: 'Download the preview as a Word document (.docx)', tag: 'Export', keywords: 'save docx doc microsoft word office download', run: () => openFilenameModal('docx') },
     { name: 'Copy HTML', desc: 'Copy the rendered preview HTML', tag: 'Export', keywords: 'clipboard rendered preview', run: () => copyHtmlOut() },
     { name: 'Print / PDF', desc: 'Open the browser print dialog', tag: 'Export', keywords: 'pdf paper', run: () => window.print() },
     { name: 'Find', desc: 'Open find and replace', tag: 'Search', keywords: 'replace search', run: () => openFind(false) },
@@ -1694,12 +1696,12 @@ function greet(name) {
     exportMenu.hidden = true;
   });
 
-  /* ---- export menu (md / html file / copy / print-PDF) ---- */
+  /* ---- export menu (md / html / docx file / copy / print-PDF) ---- */
   exportMenu.addEventListener('click', e => {
     const b = e.target.closest('button[data-exp]'); if (!b) return;
     exportMenu.hidden = true;
     const k = b.dataset.exp;
-    if (k === 'md' || k === 'html') openFilenameModal(k);   // ask for a name first
+    if (k === 'md' || k === 'html' || k === 'docx') openFilenameModal(k);   // ask for a name first
     else if (k === 'copy') copyHtmlOut();
     else window.print();
   });
@@ -1777,6 +1779,454 @@ function greet(name) {
     flash('Saved ' + name);
   }
 
+  /* ---- Word (.docx) export: walk the rendered preview → WordprocessingML, zip it ourselves ---- */
+  const DOCX_MIME = 'application/vnd.openxmlformats-officedocument.wordprocessingml.document';
+  const DOCX_TEXT_W = 9360;          // 6.5in printable width (Letter, 1in margins), in twips
+  const DOCX_MAX_PX = 624;           // same width in CSS px (96 dpi)
+  const EMU_PER_PX = 9525;
+  const DOCX_BLOCK = /^(P|H[1-6]|UL|OL|PRE|BLOCKQUOTE|TABLE|HR|DIV|DL|FIGURE|SECTION|DETAILS)$/;
+
+  async function exportDocx(name) {
+    flash('Building ' + name + '…');
+    try {
+      const blob = await buildDocx(name.replace(/\.docx$/i, ''));
+      downloadFile(name, blob, DOCX_MIME);
+      flash('Saved ' + name);
+    } catch (err) {
+      console.error(err);
+      flash('Word export failed');
+    }
+  }
+
+  async function buildDocx(title) {
+    const st = { links: [], media: [], images: new Map(), nums: [], drawId: 0 };
+    await collectDocxImages(st);
+    const body = docxFlow(preview, {}, st) || '<w:p/>';
+    const files = [
+      { name: '[Content_Types].xml', data: docxContentTypes() },
+      { name: '_rels/.rels', data: docxRootRels() },
+      { name: 'docProps/core.xml', data: docxCore(title) },
+      { name: 'word/document.xml', data: docxDocument(body) },
+      { name: 'word/styles.xml', data: docxStyles() },
+      { name: 'word/numbering.xml', data: docxNumbering(st.nums) },
+      { name: 'word/_rels/document.xml.rels', data: docxDocRels(st) },
+      ...st.media.map(m => ({ name: 'word/media/' + m.file, data: m.bytes }))
+    ];
+    return makeZip(files);
+  }
+
+  function xmlEsc(s) {
+    return String(s)
+      .replace(/[\u0000-\u0008\u000B\u000C\u000E-\u001F￾￿]/g, '')   // not legal in XML
+      .replace(/[&<>"]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
+  }
+  function cssHex(color, fallback) {
+    const m = String(color || '').match(/rgba?\(\s*(\d+)[,\s]+(\d+)[,\s]+(\d+)(?:[,\s/]+([\d.]+))?/);
+    if (m && (m[4] === undefined || +m[4] > 0)) return [m[1], m[2], m[3]].map(n => (+n).toString(16).padStart(2, '0')).join('').toUpperCase();
+    const h = String(color || '').match(/^#([0-9a-f]{6})$/i);
+    return h ? h[1].toUpperCase() : fallback;
+  }
+
+  /* images: rasterize Mermaid SVGs and <img>s to PNG up front so the walk below stays synchronous */
+  async function collectDocxImages(st) {
+    const add = (el, png) => {
+      const n = st.media.length + 1;
+      let { w, h } = png;
+      if (w > DOCX_MAX_PX) { h = Math.round(h * DOCX_MAX_PX / w); w = DOCX_MAX_PX; }
+      st.media.push({ file: `image${n}.png`, bytes: png.bytes });
+      st.images.set(el, { rid: 'rIdImg' + n, w, h });
+    };
+    for (const fig of preview.querySelectorAll('.mermaid-fig')) {
+      const svg = fig.querySelector('svg');
+      if (svg) try { add(fig, await svgToPng(svg)); } catch {}
+    }
+    for (const img of preview.querySelectorAll('img')) {
+      try { add(img, await imgToPng(img)); } catch {}   // cross-origin images taint the canvas → alt text instead
+    }
+  }
+  function canvasPng(canvas) {
+    return new Promise((resolve, reject) => canvas.toBlob(b => b ? resolve(b.arrayBuffer()) : reject(new Error('toBlob')), 'image/png'))
+      .then(buf => new Uint8Array(buf));
+  }
+  function loadImage(src) {
+    return new Promise((resolve, reject) => {
+      const img = new Image();
+      img.onload = () => resolve(img);
+      img.onerror = reject;
+      img.src = src;
+    });
+  }
+  async function svgToPng(svg) {
+    const r = svg.getBoundingClientRect();
+    const vb = svg.viewBox && svg.viewBox.baseVal;
+    const w = Math.round(r.width || (vb && vb.width) || 600), h = Math.round(r.height || (vb && vb.height) || 400);
+    const clone = svg.cloneNode(true);
+    clone.setAttribute('xmlns', 'http://www.w3.org/2000/svg');
+    clone.setAttribute('width', w); clone.setAttribute('height', h);
+    clone.style.maxWidth = '';
+    const img = await loadImage('data:image/svg+xml;charset=utf-8,' + encodeURIComponent(new XMLSerializer().serializeToString(clone)));
+    const scale = 2;   // keep diagrams crisp when Word scales them
+    const canvas = document.createElement('canvas');
+    canvas.width = w * scale; canvas.height = h * scale;
+    const ctx = canvas.getContext('2d');
+    ctx.fillStyle = getComputedStyle(preview).backgroundColor || '#fff';   // match the theme the diagram was drawn for
+    ctx.fillRect(0, 0, canvas.width, canvas.height);
+    ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
+    return { bytes: await canvasPng(canvas), w, h };
+  }
+  async function imgToPng(img) {
+    if (!img.complete || !img.naturalWidth) throw new Error('image not loaded');
+    const canvas = document.createElement('canvas');
+    canvas.width = img.naturalWidth; canvas.height = img.naturalHeight;
+    canvas.getContext('2d').drawImage(img, 0, 0);
+    const r = img.getBoundingClientRect();
+    const w = Math.round(r.width || img.naturalWidth), h = Math.round(r.height || img.naturalHeight);
+    return { bytes: await canvasPng(canvas), w, h };
+  }
+  function docxDrawing(info, st) {
+    const id = ++st.drawId, cx = info.w * EMU_PER_PX, cy = info.h * EMU_PER_PX;
+    return `<w:r><w:drawing><wp:inline distT="0" distB="0" distL="0" distR="0"><wp:extent cx="${cx}" cy="${cy}"/>` +
+      `<wp:docPr id="${id}" name="Picture ${id}"/><a:graphic xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main">` +
+      `<a:graphicData uri="http://schemas.openxmlformats.org/drawingml/2006/picture"><pic:pic xmlns:pic="http://schemas.openxmlformats.org/drawingml/2006/picture">` +
+      `<pic:nvPicPr><pic:cNvPr id="${id}" name="Picture ${id}"/><pic:cNvPicPr/></pic:nvPicPr>` +
+      `<pic:blipFill><a:blip r:embed="${info.rid}"/><a:stretch><a:fillRect/></a:stretch></pic:blipFill>` +
+      `<pic:spPr><a:xfrm><a:off x="0" y="0"/><a:ext cx="${cx}" cy="${cy}"/></a:xfrm><a:prstGeom prst="rect"><a:avLst/></a:prstGeom></pic:spPr>` +
+      `</pic:pic></a:graphicData></a:graphic></wp:inline></w:drawing></w:r>`;
+  }
+
+  /* inline content → runs */
+  function docxRun(text, f = {}) {
+    if (!text) return '';
+    let p = '';
+    if (f.style) p += `<w:rStyle w:val="${f.style}"/>`;
+    if (f.b) p += '<w:b/>';
+    if (f.i) p += '<w:i/>';
+    if (f.s) p += '<w:strike/>';
+    if (f.color) p += `<w:color w:val="${f.color}"/>`;
+    if (f.mark) p += '<w:highlight w:val="yellow"/>';
+    if (f.va) p += `<w:vertAlign w:val="${f.va}"/>`;
+    return `<w:r>${p ? `<w:rPr>${p}</w:rPr>` : ''}<w:t xml:space="preserve">${xmlEsc(text)}</w:t></w:r>`;
+  }
+  function docxSkip(el) {
+    return el.matches('button, script, style, .copy-btn, .sort-ind');
+  }
+  function docxInline(nodes, f, st) {
+    let out = '';
+    for (const n of nodes) {
+      if (n.nodeType === 3) { out += docxRun(n.nodeValue.replace(/\s+/g, ' '), f); continue; }
+      if (n.nodeType !== 1 || docxSkip(n)) continue;
+      const tag = n.tagName, kids = n.childNodes;
+      if (n.classList.contains('katex')) {   // Word has no LaTeX: keep the TeX source, set as math
+        const tex = n.querySelector('annotation[encoding="application/x-tex"]');
+        out += docxRun(tex ? tex.textContent : n.textContent, { ...f, style: 'MathChar' });
+      } else if (st.images.has(n)) out += docxDrawing(st.images.get(n), st);
+      else if (tag === 'IMG') out += docxRun(n.alt ? `[${n.alt}]` : '[image]', { ...f, i: true });
+      else if (tag === 'BR') out += '<w:r><w:br/></w:r>';
+      else if (tag === 'INPUT' && n.type === 'checkbox') out += docxRun(n.checked ? '☒ ' : '☐ ', f);
+      else if (tag === 'STRONG' || tag === 'B') out += docxInline(kids, { ...f, b: true }, st);
+      else if (tag === 'EM' || tag === 'I') out += docxInline(kids, { ...f, i: true }, st);
+      else if (tag === 'DEL' || tag === 'S') out += docxInline(kids, { ...f, s: true }, st);
+      else if (tag === 'MARK') out += docxInline(kids, { ...f, mark: true }, st);
+      else if (tag === 'SUP' || tag === 'SUB') out += docxInline(kids, { ...f, va: tag === 'SUP' ? 'superscript' : 'subscript' }, st);
+      else if (tag === 'CODE') out += docxRun(n.textContent, { ...f, style: 'CodeChar' });
+      else if (tag === 'A' && /^(https?:|mailto:)/i.test(n.getAttribute('href') || '')) {
+        const id = 'rIdLink' + (st.links.length + 1);
+        st.links.push({ id, target: n.getAttribute('href') });
+        out += `<w:hyperlink r:id="${id}">${docxInline(kids, { ...f, style: 'Hyperlink' }, st)}</w:hyperlink>`;
+      } else out += docxInline(kids, f, st);
+    }
+    return out;
+  }
+
+  /* block content → paragraphs / tables. ctx: { style, num, indent, rf, jc } */
+  function docxPara(ctx, runs, extra = {}) {
+    let ppr = '';
+    const style = extra.style || ctx.style;
+    if (style) ppr += `<w:pStyle w:val="${style}"/>`;
+    const numbered = ctx.num && !ctx.num.used;   // only a list item's first paragraph gets the bullet/number
+    if (numbered) {
+      ppr += `<w:numPr><w:ilvl w:val="${ctx.num.ilvl}"/><w:numId w:val="${ctx.num.id}"/></w:numPr>`;
+      ctx.num.used = true;
+    }
+    if (extra.border) ppr += '<w:pBdr><w:bottom w:val="single" w:sz="6" w:space="1" w:color="D9D8D2"/></w:pBdr>';
+    if (extra.after != null) ppr += `<w:spacing w:after="${extra.after}"/>`;
+    if (!numbered && ctx.indent) ppr += `<w:ind w:left="${ctx.indent}"/>`;   // continuation paragraphs line up with the item text
+    const jc = extra.jc || ctx.jc;
+    if (jc) ppr += `<w:jc w:val="${jc}"/>`;
+    return `<w:p>${ppr ? `<w:pPr>${ppr}</w:pPr>` : ''}${runs}</w:p>`;
+  }
+  function docxFlow(parent, ctx, st) {
+    let out = '', buf = [];
+    const flush = () => {
+      if (buf.some(n => n.nodeType === 1 || n.nodeValue.trim())) out += docxPara(ctx, docxInline(buf, ctx.rf || {}, st));
+      buf = [];
+    };
+    for (const n of parent.childNodes) {
+      if (n.nodeType === 1 && docxSkip(n)) continue;
+      if (n.nodeType === 1 && DOCX_BLOCK.test(n.tagName)) { flush(); out += docxBlock(n, ctx, st); }
+      else if (n.nodeType === 1 || n.nodeType === 3) buf.push(n);
+    }
+    flush();
+    return out;
+  }
+  function docxBlock(el, ctx, st) {
+    const tag = el.tagName, cls = el.classList;
+    if (/^H[1-6]$/.test(tag)) return docxPara({}, docxInline(el.childNodes, {}, st), { style: 'Heading' + tag[1] });
+    if (tag === 'P') return docxPara(ctx, docxInline(el.childNodes, ctx.rf || {}, st));
+    if (tag === 'UL' || tag === 'OL') return docxList(el, ctx, st);
+    if (tag === 'PRE') return docxCode(el);
+    if (tag === 'HR') return docxPara({}, '', { border: true });
+    if (tag === 'TABLE') return docxTable(el, st);
+    if (tag === 'DL') return docxDl(el, st);
+    if (tag === 'BLOCKQUOTE') return docxFlow(el, { ...ctx, style: 'Quote' }, st);
+    if (cls.contains('callout-title')) return docxPara(ctx, docxRun(el.textContent, { b: true, color: '126E63' }));
+    if (cls.contains('roadmap')) return docxRoadmap(el);
+    if (st.images.has(el)) return docxPara({}, docxDrawing(st.images.get(el), st), { jc: 'center' });
+    return docxFlow(el, ctx, st);
+  }
+  function docxList(el, ctx, st) {
+    const level = ctx.level == null ? 0 : ctx.level + 1;
+    const ilvl = Math.min(level, 8);
+    let id = 1;   // numId 1 = shared bullet list
+    if (el.tagName === 'OL') {   // each ordered list gets its own instance so numbering restarts
+      id = st.nums.length + 2;
+      st.nums.push({ id, ilvl, start: parseInt(el.getAttribute('start'), 10) || 1 });
+    }
+    let out = '';
+    for (const li of el.children) {
+      if (li.tagName !== 'LI') continue;
+      out += docxFlow(li, { style: ctx.style || 'ListParagraph', level, indent: 720 * (ilvl + 1), num: { id, ilvl, used: false } }, st);
+    }
+    return out;
+  }
+  function docxCode(pre) {
+    const code = pre.querySelector('code') || pre;
+    const lines = code.textContent.replace(/\n$/, '').split('\n');
+    return lines.map((line, i) => docxPara({}, docxRun(line.replace(/\t/g, '    ')), {
+      style: 'Code', after: i === lines.length - 1 ? 200 : null
+    })).join('');
+  }
+  function docxCell(content, { w, span = 1, fill, borderLeft } = {}) {
+    let pr = `<w:tcW w:w="${w}" w:type="dxa"/>`;
+    if (span > 1) pr += `<w:gridSpan w:val="${span}"/>`;
+    if (borderLeft) pr += `<w:tcBorders><w:left w:val="single" w:sz="24" w:space="0" w:color="${borderLeft}"/></w:tcBorders>`;
+    if (fill) pr += `<w:shd w:val="clear" w:color="auto" w:fill="${fill}"/>`;
+    return `<w:tc><w:tcPr>${pr}</w:tcPr>${content || '<w:p/>'}</w:tc>`;
+  }
+  function docxTableXml(widths, rowsXml) {
+    return `<w:tbl><w:tblPr><w:tblW w:w="${widths.reduce((a, b) => a + b, 0)}" w:type="dxa"/>` +
+      '<w:tblBorders>' + ['top', 'left', 'bottom', 'right', 'insideH', 'insideV']
+        .map(s => `<w:${s} w:val="single" w:sz="4" w:space="0" w:color="D9D8D2"/>`).join('') + '</w:tblBorders>' +
+      '<w:tblLayout w:type="fixed"/><w:tblCellMar><w:left w:w="100" w:type="dxa"/><w:right w:w="100" w:type="dxa"/></w:tblCellMar></w:tblPr>' +
+      `<w:tblGrid>${widths.map(w => `<w:gridCol w:w="${w}"/>`).join('')}</w:tblGrid>${rowsXml}</w:tbl>` +
+      '<w:p><w:pPr><w:spacing w:after="0"/></w:pPr></w:p>';   // Word needs a paragraph between adjacent tables
+  }
+  function docxTable(table, st) {
+    const rows = Array.from(table.rows);
+    const cols = Math.max(1, ...rows.map(r => r.cells.length));
+    const w = Math.floor(DOCX_TEXT_W / cols), widths = Array(cols).fill(w);
+    const xml = rows.map(r => {
+      const head = r.parentElement.tagName === 'THEAD';
+      const cells = Array.from(r.cells).map(c => {
+        const align = (c.getAttribute('align') || c.style.textAlign || '').toLowerCase();
+        const jc = align === 'center' ? 'center' : align === 'right' ? 'right' : '';
+        return docxCell(docxFlow(c, { style: 'TableText', rf: head ? { b: true } : null, jc }, st), { w, fill: head ? 'F3F2EE' : '' });
+      });
+      while (cells.length < cols) cells.push(docxCell('', { w }));
+      return `<w:tr>${head ? '<w:trPr><w:tblHeader/></w:trPr>' : ''}${cells.join('')}</w:tr>`;
+    }).join('');
+    return docxTableXml(widths, xml);
+  }
+  function docxDl(dl, st) {   // front-matter card (and any other <dl>) → two-column key/value table
+    const widths = [2400, DOCX_TEXT_W - 2400];
+    let xml = '';
+    for (const dt of dl.querySelectorAll('dt')) {
+      const dd = dt.nextElementSibling && dt.nextElementSibling.tagName === 'DD' ? dt.nextElementSibling : null;
+      xml += '<w:tr>' +
+        docxCell(docxPara({ style: 'TableText' }, docxRun(dt.textContent, { b: true, color: '5B5D66' })), { w: widths[0], fill: 'F3F2EE' }) +
+        docxCell(dd ? docxFlow(dd, { style: 'TableText' }, st) : '', { w: widths[1] }) + '</w:tr>';
+    }
+    return xml ? docxTableXml(widths, xml) : '';
+  }
+  function docxRoadmap(rm) {   // CSS-grid swimlane → table: label column + one column per period, bars as shaded cells
+    const n = parseInt(rm.style.getPropertyValue('--rm-cols'), 10) || 1;
+    const labelW = 2400, colW = Math.floor((DOCX_TEXT_W - labelW) / n);
+    const widths = [labelW, ...Array(n).fill(colW)];
+    const full = (content, opts) => `<w:tr>${docxCell(content, { w: labelW + colW * n, span: n + 1, ...opts })}</w:tr>`;
+    const track = (tr, head) => {   // walk grid children left→right, padding gaps with empty cells
+      let col = 1, cells = '';
+      const items = Array.from(tr ? tr.children : []).map(c => {
+        const [a, b] = (c.style.gridColumn || '').split('/').map(v => parseInt(v, 10));
+        return { c, a: a || 1, b: b || (a || 1) + 1 };
+      }).sort((x, y) => x.a - y.a);
+      for (const { c, a, b } of items) {
+        for (; col < a; col++) cells += docxCell('', { w: colW, fill: head ? 'F3F2EE' : '' });
+        const span = Math.max(1, Math.min(b, n + 1) - a);
+        const text = head ? (c.firstChild ? c.firstChild.textContent : c.textContent) : '';
+        const fill = head ? 'F3F2EE' : cssHex(getComputedStyle(c).backgroundColor, '126E63');
+        cells += docxCell(docxPara({ style: 'TableText', jc: 'center' }, docxRun(text, { b: c.classList.contains('rm-year'), color: '5B5D66' })), { w: colW * span, span, fill });
+        col = a + span;
+      }
+      for (; col <= n; col++) cells += docxCell('', { w: colW, fill: head ? 'F3F2EE' : '' });
+      return cells;
+    };
+    let xml = '';
+    for (const el of rm.children) {
+      if (el.classList.contains('rm-title')) xml += full(docxPara({ style: 'TableText' }, docxRun(el.textContent, { b: true })), { fill: 'F3F2EE' });
+      else if (el.classList.contains('rm-epic')) {
+        xml += full(docxPara({ style: 'TableText' }, docxRun(el.textContent, { b: true })), { fill: 'E3EFED', borderLeft: cssHex(el.style.borderLeftColor, '126E63') });
+      } else if (el.classList.contains('rm-row')) {
+        const label = el.querySelector('.rm-label'), tr = el.querySelector('.rm-track');
+        const head = tr && tr.classList.contains('rm-head');
+        const cap = label && label.classList.contains('rm-cap');
+        const labelXml = label ? docxPara({ style: 'TableText' }, docxRun((cap ? '' : '    ') + label.textContent, { b: cap, color: cap ? '5B5D66' : '' })) : '';
+        xml += `<w:tr>${docxCell(labelXml, { w: labelW, fill: head ? 'F3F2EE' : '' })}${track(tr, head)}</w:tr>`;
+      }
+    }
+    return docxTableXml(widths, xml);
+  }
+
+  /* package parts */
+  function docxDocument(body) {
+    return '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>' +
+      '<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main" ' +
+      'xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships" ' +
+      'xmlns:wp="http://schemas.openxmlformats.org/drawingml/2006/wordprocessingDrawing">' +
+      `<w:body>${body}<w:sectPr><w:pgSz w:w="12240" w:h="15840"/>` +
+      '<w:pgMar w:top="1440" w:right="1440" w:bottom="1440" w:left="1440" w:header="720" w:footer="720" w:gutter="0"/></w:sectPr></w:body></w:document>';
+  }
+  function docxStyles() {
+    const sans = '<w:rFonts w:ascii="Arial" w:hAnsi="Arial" w:cs="Arial"/>';
+    const mono = '<w:rFonts w:ascii="Consolas" w:hAnsi="Consolas" w:cs="Consolas"/>';
+    const sizes = [40, 32, 28, 24, 22, 22];
+    const headings = sizes.map((sz, i) =>
+      `<w:style w:type="paragraph" w:styleId="Heading${i + 1}"><w:name w:val="heading ${i + 1}"/><w:basedOn w:val="Normal"/><w:next w:val="Normal"/><w:qFormat/>` +
+      `<w:pPr><w:keepNext/>${i === 0 ? '<w:pBdr><w:bottom w:val="single" w:sz="6" w:space="2" w:color="E7E6E1"/></w:pBdr>' : ''}` +
+      `<w:spacing w:before="${i < 2 ? 360 : 240}" w:after="120" w:line="264" w:lineRule="auto"/><w:outlineLvl w:val="${i}"/></w:pPr>` +
+      `<w:rPr>${sans}<w:b/>${i === 5 ? '<w:color w:val="5B5D66"/>' : ''}<w:sz w:val="${sz}"/></w:rPr></w:style>`).join('');
+    return '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>' +
+      '<w:styles xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">' +
+      '<w:docDefaults><w:rPrDefault><w:rPr><w:rFonts w:ascii="Georgia" w:hAnsi="Georgia" w:eastAsia="Georgia" w:cs="Georgia"/>' +
+      '<w:color w:val="1C1D22"/><w:sz w:val="22"/><w:szCs w:val="22"/><w:lang w:val="en-US"/></w:rPr></w:rPrDefault>' +
+      '<w:pPrDefault><w:pPr><w:spacing w:after="160" w:line="300" w:lineRule="auto"/></w:pPr></w:pPrDefault></w:docDefaults>' +
+      '<w:style w:type="paragraph" w:default="1" w:styleId="Normal"><w:name w:val="Normal"/><w:qFormat/></w:style>' +
+      headings +
+      '<w:style w:type="paragraph" w:styleId="ListParagraph"><w:name w:val="List Paragraph"/><w:basedOn w:val="Normal"/><w:pPr><w:spacing w:after="60"/></w:pPr></w:style>' +
+      '<w:style w:type="paragraph" w:styleId="Quote"><w:name w:val="Quote"/><w:basedOn w:val="Normal"/><w:qFormat/>' +
+      '<w:pPr><w:pBdr><w:left w:val="single" w:sz="18" w:space="8" w:color="126E63"/></w:pBdr><w:ind w:left="300"/></w:pPr>' +
+      '<w:rPr><w:i/><w:color w:val="5B5D66"/></w:rPr></w:style>' +
+      '<w:style w:type="paragraph" w:styleId="Code"><w:name w:val="Code"/><w:basedOn w:val="Normal"/>' +
+      '<w:pPr><w:shd w:val="clear" w:color="auto" w:fill="F3F2EE"/><w:spacing w:after="0" w:line="240" w:lineRule="auto"/></w:pPr>' +
+      `<w:rPr>${mono}<w:sz w:val="18"/><w:szCs w:val="18"/></w:rPr></w:style>` +
+      '<w:style w:type="paragraph" w:styleId="TableText"><w:name w:val="Table Text"/><w:basedOn w:val="Normal"/>' +
+      '<w:pPr><w:spacing w:before="40" w:after="40" w:line="240" w:lineRule="auto"/></w:pPr><w:rPr><w:sz w:val="20"/></w:rPr></w:style>' +
+      '<w:style w:type="character" w:styleId="CodeChar"><w:name w:val="Inline Code"/>' +
+      `<w:rPr>${mono}<w:sz w:val="19"/><w:shd w:val="clear" w:color="auto" w:fill="F3F2EE"/></w:rPr></w:style>` +
+      '<w:style w:type="character" w:styleId="MathChar"><w:name w:val="Math"/>' +
+      '<w:rPr><w:rFonts w:ascii="Cambria Math" w:hAnsi="Cambria Math"/><w:i/></w:rPr></w:style>' +
+      '<w:style w:type="character" w:styleId="Hyperlink"><w:name w:val="Hyperlink"/>' +
+      '<w:rPr><w:color w:val="126E63"/><w:u w:val="single"/></w:rPr></w:style>' +
+      '</w:styles>';
+  }
+  function docxNumbering(nums) {
+    const bullets = ['•', '◦', '▪'];
+    const romanAlpha = ['decimal', 'lowerLetter', 'lowerRoman'];
+    const lvl = (i, fmt, text) => `<w:lvl w:ilvl="${i}"><w:start w:val="1"/><w:numFmt w:val="${fmt}"/>` +
+      `<w:lvlText w:val="${xmlEsc(text)}"/><w:lvlJc w:val="left"/><w:pPr><w:ind w:left="${720 * (i + 1)}" w:hanging="360"/></w:pPr></w:lvl>`;
+    const levels = fn => Array.from({ length: 9 }, (_, i) => fn(i)).join('');
+    return '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>' +
+      '<w:numbering xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">' +
+      `<w:abstractNum w:abstractNumId="0"><w:multiLevelType w:val="hybridMultilevel"/>${levels(i => lvl(i, 'bullet', bullets[i % 3]))}</w:abstractNum>` +
+      `<w:abstractNum w:abstractNumId="1"><w:multiLevelType w:val="hybridMultilevel"/>${levels(i => lvl(i, romanAlpha[i % 3], `%${i + 1}.`))}</w:abstractNum>` +
+      '<w:num w:numId="1"><w:abstractNumId w:val="0"/></w:num>' +
+      nums.map(n => `<w:num w:numId="${n.id}"><w:abstractNumId w:val="1"/>` +
+        `<w:lvlOverride w:ilvl="${n.ilvl}"><w:startOverride w:val="${n.start}"/></w:lvlOverride></w:num>`).join('') +
+      '</w:numbering>';
+  }
+  function docxDocRels(st) {
+    const rel = (id, type, target, ext) => `<Relationship Id="${id}" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/${type}" Target="${xmlEsc(target)}"${ext ? ' TargetMode="External"' : ''}/>`;
+    return '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>' +
+      '<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">' +
+      rel('rIdStyles', 'styles', 'styles.xml') + rel('rIdNumbering', 'numbering', 'numbering.xml') +
+      st.media.map((m, i) => rel('rIdImg' + (i + 1), 'image', 'media/' + m.file)).join('') +
+      st.links.map(l => rel(l.id, 'hyperlink', l.target, true)).join('') +
+      '</Relationships>';
+  }
+  function docxRootRels() {
+    return '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>' +
+      '<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">' +
+      '<Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="word/document.xml"/>' +
+      '<Relationship Id="rId2" Type="http://schemas.openxmlformats.org/package/2006/relationships/metadata/core-properties" Target="docProps/core.xml"/>' +
+      '</Relationships>';
+  }
+  function docxContentTypes() {
+    const ov = (part, type) => `<Override PartName="${part}" ContentType="application/vnd.openxmlformats-${type}"/>`;
+    return '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>' +
+      '<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">' +
+      '<Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/>' +
+      '<Default Extension="xml" ContentType="application/xml"/><Default Extension="png" ContentType="image/png"/>' +
+      ov('/word/document.xml', 'officedocument.wordprocessingml.document.main+xml') +
+      ov('/word/styles.xml', 'officedocument.wordprocessingml.styles+xml') +
+      ov('/word/numbering.xml', 'officedocument.wordprocessingml.numbering+xml') +
+      ov('/docProps/core.xml', 'package.core-properties+xml') +
+      '</Types>';
+  }
+  function docxCore(title) {
+    const now = new Date().toISOString().replace(/\.\d+Z$/, 'Z');
+    return '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>' +
+      '<cp:coreProperties xmlns:cp="http://schemas.openxmlformats.org/package/2006/metadata/core-properties" ' +
+      'xmlns:dc="http://purl.org/dc/elements/1.1/" xmlns:dcterms="http://purl.org/dc/terms/" ' +
+      'xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance">' +
+      `<dc:title>${xmlEsc(title)}</dc:title><dc:creator>Inkwell</dc:creator>` +
+      `<dcterms:created xsi:type="dcterms:W3CDTF">${now}</dcterms:created>` +
+      `<dcterms:modified xsi:type="dcterms:W3CDTF">${now}</dcterms:modified></cp:coreProperties>`;
+  }
+
+  /* minimal store-only ZIP writer — a .docx is just a zip of the XML parts above */
+  const CRC_TABLE = (() => {
+    const t = new Uint32Array(256);
+    for (let n = 0; n < 256; n++) {
+      let c = n;
+      for (let k = 0; k < 8; k++) c = c & 1 ? 0xEDB88320 ^ (c >>> 1) : c >>> 1;
+      t[n] = c >>> 0;
+    }
+    return t;
+  })();
+  function crc32(bytes) {
+    let c = 0xFFFFFFFF;
+    for (let i = 0; i < bytes.length; i++) c = CRC_TABLE[(c ^ bytes[i]) & 0xFF] ^ (c >>> 8);
+    return (c ^ 0xFFFFFFFF) >>> 0;
+  }
+  function makeZip(files) {
+    const enc = new TextEncoder(), parts = [], central = [];
+    let offset = 0;
+    for (const f of files) {
+      const name = enc.encode(f.name);
+      const data = typeof f.data === 'string' ? enc.encode(f.data) : f.data;
+      const crc = crc32(data);
+      const head = (sig, size) => { const v = new DataView(new ArrayBuffer(size)); v.setUint32(0, sig, true); return v; };
+      const lh = head(0x04034b50, 30);
+      lh.setUint16(4, 20, true); lh.setUint16(6, 0x0800, true);   // version 2.0, UTF-8 names
+      lh.setUint16(12, 0x21, true);                               // DOS date 1980-01-01
+      lh.setUint32(14, crc, true); lh.setUint32(18, data.length, true); lh.setUint32(22, data.length, true);
+      lh.setUint16(26, name.length, true);
+      parts.push(new Uint8Array(lh.buffer), name, data);
+      const ch = head(0x02014b50, 46);
+      ch.setUint16(4, 20, true); ch.setUint16(6, 20, true); ch.setUint16(8, 0x0800, true);
+      ch.setUint16(14, 0x21, true);
+      ch.setUint32(16, crc, true); ch.setUint32(20, data.length, true); ch.setUint32(24, data.length, true);
+      ch.setUint16(28, name.length, true); ch.setUint32(42, offset, true);
+      central.push(new Uint8Array(ch.buffer), name);
+      offset += 30 + name.length + data.length;
+    }
+    const size = central.reduce((s, c) => s + c.length, 0);
+    const end = new DataView(new ArrayBuffer(22));
+    end.setUint32(0, 0x06054b50, true);
+    end.setUint16(8, files.length, true); end.setUint16(10, files.length, true);
+    end.setUint32(12, size, true); end.setUint32(16, offset, true);
+    return new Blob([...parts, ...central, new Uint8Array(end.buffer)], { type: DOCX_MIME });
+  }
+
   /* ---- export filename prompt ---- */
   const fnameModal = document.getElementById('filenameModal');
   const fnameInput = document.getElementById('fnameInput');
@@ -1791,21 +2241,22 @@ function greet(name) {
   }
   function openFilenameModal(format) {
     exportFormat = format;
-    fnameExt.textContent = '.' + (format === 'md' ? 'md' : 'html');
+    fnameExt.textContent = '.' + format;
     fnameInput.value = (docName && docName !== 'untitled.md')
-      ? docName.replace(/\.(md|markdown|html?|txt)$/i, '')
+      ? docName.replace(/\.(md|markdown|html?|docx|txt)$/i, '')
       : defaultBaseName();
     fnameModal.hidden = false;
     fnameInput.focus(); fnameInput.select();
   }
   function closeFilename() { fnameModal.hidden = true; editor.focus(); }
   function confirmFilename() {
-    const ext = exportFormat === 'md' ? 'md' : 'html';
-    let base = fnameInput.value.trim().replace(/[\\/:*?"<>|]+/g, '').replace(/\.(md|markdown|html?|txt)$/i, '');
+    const ext = exportFormat;
+    let base = fnameInput.value.trim().replace(/[\\/:*?"<>|]+/g, '').replace(/\.(md|markdown|html?|docx|txt)$/i, '');
     if (!base) base = 'document';
     const name = base + '.' + ext;
     closeFilename();
     if (ext === 'md') { exportMd(name); setDocName(name); }   // saving markdown renames the working doc
+    else if (ext === 'docx') exportDocx(name);
     else exportHtml(name);
   }
   document.getElementById('fnameConfirm').addEventListener('click', confirmFilename);

@@ -37,7 +37,7 @@ It is also the behavioral reference for a planned **SwiftUI macOS port** (not ye
 - Sortable tables (preview-only; does not rewrite the source).
 - Interactive task checkboxes (these *do* rewrite the source so they persist + undo).
 - Themes (light/dark, token-based CSS variables; accent is ink-teal).
-- Import (button + drag-drop), export (.md / standalone .html / copy HTML / print-to-PDF).
+- Import (button + drag-drop), export (.md / standalone .html / Word .docx / copy HTML / print-to-PDF).
 - Autosave + document name, persisted via the artifact `window.storage` KV store.
 - About modal.
 
